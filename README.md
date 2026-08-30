@@ -16,7 +16,7 @@
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/codingsushi79/ccli/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/codingsushi79/ccli/master/install.sh | bash
 ```
 
 Builds from source, installs as `cryptocli` (and `ccli`), and tells you exactly
