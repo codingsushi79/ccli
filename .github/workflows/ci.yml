@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --release
+      - name: Build
+        run: cargo build --release
+      - name: Smoke test
+        run: |
+          ./target/release/cryptocli --version
+          ./target/release/cryptocli algos
+          ./target/release/cryptocli bench --seconds 1 --threads 2
+      - name: Remote identity and pinning
+        env:
+          CRYPTOCLI_HOME: ${{ runner.temp }}/cryptocli-ci
+        run: |
+          ./target/release/cryptocli remote enable --listen 127.0.0.1:19944
+          ./target/release/cryptocli remote show | grep -q '^fingerprint: sha256:'
+
+  install-script:
+    name: install script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Syntax
+        run: bash -n install.sh
+      - name: Run against this checkout
+        run: CCLI_INSTALL_DIR="$HOME/.local/bin" ./install.sh
+      - name: Installed binary works
+        run: |
+          "$HOME/.local/bin/cryptocli" --version
+          "$HOME/.local/bin/ccli" --version

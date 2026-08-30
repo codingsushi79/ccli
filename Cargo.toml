@@ -1,0 +1,40 @@
+[package]
+name = "cryptocli"
+version = "0.1.0"
+edition = "2024"
+description = "Multi-coin CPU mining with a live TUI and a daemon that keeps going after you close it"
+authors = ["codingsushi79"]
+license = "MIT"
+repository = "https://github.com/codingsushi79/ccli"
+homepage = "https://github.com/codingsushi79/ccli"
+readme = "README.md"
+keywords = ["mining", "stratum", "tui", "bitcoin", "cryptocurrency"]
+categories = ["command-line-utilities"]
+exclude = ["/.github", "install.sh"]
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = "0.4.45"
+clap = { version = "4.6.6", features = ["derive"] }
+dirs = "6.0.0"
+hex = "0.4.3"
+libc = "0.2.189"
+ratatui = "0.30.2"
+rcgen = "0.14.10"
+rustls = { version = "0.23.43", default-features = false, features = ["ring"] }
+rustls-pki-types = "1.15.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = { version = "0.10", features = ["compress"] }
+sysinfo = "0.39.6"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
+toml = "1.1.4"
+ureq = "3.4.0"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "unwind"

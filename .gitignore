@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Local runtime state, in case anyone points CRYPTOCLI_HOME at the checkout
+*.sock
+*.pid
+daemon.log*
+config.toml
