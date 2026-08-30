@@ -2,18 +2,18 @@
 #
 # cryptocli installer
 #
-#   curl -fsSL https://raw.githubusercontent.com/codingsushi79/ccli/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/codingsushi79/ccli/master/install.sh | bash
 #
 # Environment overrides:
 #   CCLI_INSTALL_DIR   where to put the binary (default: first sensible dir on PATH)
 #   CCLI_REPO          owner/name to clone from     (default: codingsushi79/ccli)
-#   CCLI_BRANCH        branch to build              (default: main)
+#   CCLI_BRANCH        branch to build              (default: master)
 #   CCLI_NO_COLOR=1    plain output
 #
 set -euo pipefail
 
 REPO="${CCLI_REPO:-codingsushi79/ccli}"
-BRANCH="${CCLI_BRANCH:-main}"
+BRANCH="${CCLI_BRANCH:-master}"
 BIN_NAME="cryptocli"
 ALIAS_NAME="ccli"
 
