@@ -114,7 +114,7 @@ if ! command -v cargo >/dev/null 2>&1; then
     printf '\n'
     warn "Rust is not installed."
     info "cryptocli builds from source. Install Rust, then re-run this script:"
-    printf '\n     %scurl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh%s\n\n' "$B" "$R"
+    printf "\n     %scurl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh%s\n\n" "$B" "$R"
     exit 1
 fi
 ok "cargo $(cargo --version | awk '{print $2}')"
