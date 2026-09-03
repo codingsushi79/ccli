@@ -192,8 +192,6 @@ impl ServerCertVerifier for PinnedVerifier {
 /// Fetch a peer's certificate fingerprint without trusting it, so `node add`
 /// can show the user what they are about to pin.
 pub fn peek_fingerprint(address: &str, timeout: std::time::Duration) -> Result<String> {
-    use std::net::{TcpStream, ToSocketAddrs};
-
     #[derive(Debug)]
     struct Peek(std::sync::Mutex<Option<String>>);
 
@@ -248,15 +246,8 @@ pub fn peek_fingerprint(address: &str, timeout: std::time::Duration) -> Result<S
         .with_custom_certificate_verifier(seen.clone())
         .with_no_client_auth();
 
-    let resolved = address
-        .to_socket_addrs()
-        .with_context(|| format!("resolving {address}"))?
-        .next()
-        .with_context(|| format!("{address} did not resolve"))?;
-    let mut socket = TcpStream::connect_timeout(&resolved, timeout)
-        .with_context(|| format!("connecting to {address}"))?;
-    socket.set_read_timeout(Some(timeout))?;
-    socket.set_write_timeout(Some(timeout))?;
+    let address = crate::net::normalize_address(address)?;
+    let mut socket = crate::net::connect(&address, timeout)?;
 
     let server_name = ServerName::try_from("cryptocli-node").expect("static name");
     let mut connection = rustls::ClientConnection::new(Arc::new(config), server_name)

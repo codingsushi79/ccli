@@ -147,10 +147,17 @@ cryptocli node add rig2 --address 192.168.1.50:9944 \
     --token <TOKEN> --fingerprint sha256:<FINGERPRINT>
 ```
 
+`--address` takes a bare host too; the port defaults to 9944. Host names that
+resolve to several addresses are all tried, so a machine with both an IPv6 and
+an IPv4 record connects even when the peer is listening on IPv4 only.
+
 The connection is verified before it's saved, so a wrong token, address or
-fingerprint fails immediately instead of becoming a permanently red row. The dashboard gains a
-**Nodes** tab and a `NODE` column, totals combine across machines, and rigs can
-be controlled remotely:
+fingerprint fails immediately instead of becoming a permanently red row, and
+the failure says what to check rather than only an OS error number. On the
+Nodes tab, `t` retries the selected machine right away — a machine that has
+been unreachable for a while is otherwise retried on a widening interval, up to
+once a minute. The dashboard gains a **Nodes** tab and a `NODE` column, totals
+combine across machines, and rigs can be controlled remotely:
 
 ```bash
 cryptocli stop rig2:btc-main       # node:rig addresses another machine
@@ -198,11 +205,17 @@ interception, it does not make the port safe to expose.
 | `+` / `-` | add or remove a thread on the selected rig, live |
 | `p` | run the selected endpoint check now |
 | `3` | the Nodes view: every machine's health at a glance |
+| `t` | in Nodes: reconnect to the selected machine now |
 | `r` | reload the config file |
 | `f` | freeze the display (mining is unaffected) |
 | `Q` | shut the daemon down |
 | `q` / `Esc` / `Ctrl-C` | close the dashboard, keep mining |
 | `?` | help |
+
+In a form, `←` `→` `Home` `End` (or `Ctrl-A` / `Ctrl-E`) move within a field and
+`Delete` removes the character under the cursor, so a typo in a long pool url or
+address is a two-keystroke fix. A form the daemon rejects stays open with
+everything you typed still in it.
 
 ## Commands
 

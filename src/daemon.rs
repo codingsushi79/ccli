@@ -924,13 +924,25 @@ impl Daemon {
             } => {
                 // Verify before persisting: a node that cannot be reached is
                 // almost always a typo, and a red row is a poor way to say so.
-                let timeout = Duration::from_secs(8);
+                //
+                // Two dials at 6s each stay inside the client's own 30s budget
+                // even when the address is a hostname with both an A and a AAAA
+                // record, where every attempt is tried before giving up.
+                let timeout = Duration::from_secs(6);
+                let address = match crate::net::normalize_address(&address) {
+                    Ok(address) => address,
+                    Err(err) => {
+                        return Response::Error {
+                            message: format!("{err:#}"),
+                        };
+                    }
+                };
                 let pin = if fingerprint.trim().is_empty() {
                     match crate::tls::peek_fingerprint(&address, timeout) {
                         Ok(seen) => seen,
                         Err(err) => {
                             return Response::Error {
-                                message: format!("cannot reach {address}: {err:#}"),
+                                message: format!("{err:#}"),
                             };
                         }
                     }
@@ -960,6 +972,26 @@ impl Daemon {
                     });
                     Ok(format!("node `{name}` added"))
                 })
+            }
+            Request::CheckNode { name } => {
+                let Some(peer) = self.peer(&name) else {
+                    return Response::Error {
+                        message: format!("no node named `{name}`"),
+                    };
+                };
+                peer.poll_now();
+                let status = peer.status();
+                if status.online {
+                    Ok(format!(
+                        "node `{name}` is up — cryptocli {}, {} ms",
+                        status.version,
+                        status.latency_ms.unwrap_or(0)
+                    ))
+                } else {
+                    Err(anyhow::anyhow!(status.last_error.unwrap_or_else(
+                        || format!("node `{name}` is not answering")
+                    )))
+                }
             }
             Request::RemoveNode { name } => self.mutate(|config| {
                 let before = config.nodes.len();
@@ -1134,6 +1166,18 @@ where
                     }
                 }
             }
+            // Adding a node makes the daemon dial the new machine, which can
+            // take seconds. Doing that inline would park a runtime worker and
+            // stall sampling and peer polling with it.
+            Ok(request @ (Request::AddNode { .. } | Request::CheckNode { .. })) => {
+                let daemon = daemon.clone();
+                match tokio::task::spawn_blocking(move || daemon.handle(request)).await {
+                    Ok(response) => response,
+                    Err(err) => Response::Error {
+                        message: format!("the daemon dropped the request: {err}"),
+                    },
+                }
+            }
             Ok(Request::Snapshot) if !peer.is_empty() => {
                 // A peer asking for a snapshot wants this machine only;
                 // returning the merged view would double-count in a mesh.
@@ -1281,9 +1325,26 @@ pub async fn run() -> Result<()> {
                             }
                         });
                     }
-                    Err(err) => daemon
-                        .log
-                        .error("remote", format!("cannot bind {listen}: {err}")),
+                    Err(err) => {
+                        let hint = match err.kind() {
+                            std::io::ErrorKind::AddrInUse => {
+                                "something else already holds that port — pick another with \
+                                 `cryptocli remote enable --listen 0.0.0.0:PORT`"
+                            }
+                            std::io::ErrorKind::AddrNotAvailable => {
+                                "this machine has no such address — use 0.0.0.0 to listen on \
+                                 every interface"
+                            }
+                            std::io::ErrorKind::PermissionDenied => {
+                                "ports below 1024 need root — pick a higher one"
+                            }
+                            _ => "check the address in `cryptocli remote show`",
+                        };
+                        daemon.log.error(
+                            "remote",
+                            format!("cannot listen on {listen}: {err} — {hint}"),
+                        );
+                    }
                 }
             }
             None => {

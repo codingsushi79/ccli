@@ -19,6 +19,9 @@ use crate::model::{NodeStatus, Snapshot};
 /// How long to wait on a peer before treating it as down.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Longest gap between attempts on a peer that keeps failing.
+const MAX_BACKOFF: Duration = Duration::from_secs(60);
+
 pub struct PeerNode {
     pub cfg: NodeConfig,
     /// Reconnected lazily; `None` means "not currently connected".
@@ -32,6 +35,10 @@ struct PeerState {
     latency_ms: Option<u64>,
     last_error: Option<String>,
     online: bool,
+    /// Consecutive failures, which set how long to wait before trying again.
+    failures: u32,
+    /// Earliest time the next scheduled poll may run.
+    next_attempt: Option<Instant>,
 }
 
 impl PeerNode {
@@ -43,10 +50,45 @@ impl PeerNode {
         }
     }
 
-    /// Fetch a fresh snapshot. Blocking; callers run it off the async runtime.
+    /// The scheduled poll, run on every daemon tick.
+    ///
+    /// Two things make this a no-op rather than a connection attempt, and both
+    /// matter once a peer goes away. A dial that has to time out takes seconds
+    /// while ticks keep arriving every second, so without the in-flight check
+    /// the attempts would queue up on the connection lock and pile blocking
+    /// threads behind a machine that is simply switched off. And a peer that
+    /// has failed repeatedly is retried on a widening interval, so an unplugged
+    /// rig costs one attempt a minute instead of one a second.
     pub fn poll(&self) {
+        {
+            let state = self.state.lock().unwrap();
+            if let Some(next) = state.next_attempt
+                && Instant::now() < next
+            {
+                return;
+            }
+        }
+        // `try_lock` is the in-flight check: the connection lock is held for
+        // the whole of an attempt.
+        let Ok(mut guard) = self.client.try_lock() else {
+            return;
+        };
+        self.attempt(&mut guard);
+    }
+
+    /// Poll right now, waiting for any attempt already running and ignoring
+    /// the backoff. This is what the dashboard's "test node" does, where the
+    /// user is asking for an answer and is willing to wait for it.
+    pub fn poll_now(&self) {
+        self.state.lock().unwrap().next_attempt = None;
+        let mut guard = self.client.lock().unwrap();
+        self.attempt(&mut guard);
+    }
+
+    /// Fetch a fresh snapshot over `guard`, recording what happened.
+    fn attempt(&self, guard: &mut Option<Client>) {
         let started = Instant::now();
-        let result = self.with_client(|client| client.snapshot());
+        let result = self.run(guard, |client| client.snapshot());
         let mut state = self.state.lock().unwrap();
         match result {
             Ok(snapshot) => {
@@ -54,11 +96,19 @@ impl PeerNode {
                 state.latency_ms = Some(started.elapsed().as_millis() as u64);
                 state.last_error = None;
                 state.online = true;
+                state.failures = 0;
+                state.next_attempt = None;
             }
             Err(err) => {
                 state.online = false;
                 state.latency_ms = None;
                 state.last_error = Some(format!("{err:#}"));
+                state.failures = state.failures.saturating_add(1);
+                // 1s, 2s, 4s ... up to a minute.
+                let backoff = Duration::from_secs(1)
+                    .saturating_mul(1u32 << state.failures.min(6))
+                    .min(MAX_BACKOFF);
+                state.next_attempt = Some(Instant::now() + backoff);
                 // Keep the last snapshot so the dashboard can still show what
                 // the peer was doing when it went away.
             }
@@ -73,7 +123,17 @@ impl PeerNode {
     /// Run `f` against a live connection, reconnecting once if needed.
     fn with_client<T>(&self, f: impl Fn(&mut Client) -> anyhow::Result<T>) -> anyhow::Result<T> {
         let mut guard = self.client.lock().unwrap();
+        self.run(&mut guard, f)
+    }
+
+    /// The body of [`Self::with_client`], for callers already holding the lock.
+    fn run<T>(
+        &self,
+        guard: &mut Option<Client>,
+        f: impl Fn(&mut Client) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
         if let Some(client) = guard.as_mut()
+            && !client.is_broken()
             && let Ok(value) = f(client)
         {
             return Ok(value);
@@ -128,8 +188,18 @@ impl PeerNode {
             },
             accepted: snapshot.map(|s| s.totals.accepted).unwrap_or(0),
             rejected: snapshot.map(|s| s.totals.rejected).unwrap_or(0),
-            cpu_usage: snapshot.map(|s| s.hardware.cpu_usage).unwrap_or(0.0),
-            hottest_c: snapshot.and_then(|s| s.hardware.temps.first().map(|t| t.celsius)),
+            // Load and temperature are only meaningful live. Leaving the last
+            // reading on an offline row made a dead machine look busy.
+            cpu_usage: if state.online {
+                snapshot.map(|s| s.hardware.cpu_usage).unwrap_or(0.0)
+            } else {
+                0.0
+            },
+            hottest_c: if state.online {
+                snapshot.and_then(|s| s.hardware.temps.first().map(|t| t.celsius))
+            } else {
+                None
+            },
             last_error: state.last_error.clone(),
         }
     }

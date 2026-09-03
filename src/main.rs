@@ -7,6 +7,7 @@ mod ipc;
 mod log;
 mod mining;
 mod model;
+mod net;
 mod nodes;
 mod paths;
 mod tls;

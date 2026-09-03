@@ -1481,10 +1481,17 @@ pub fn nodes(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
     if let Some(error) = &node.last_error {
+        // Connection errors carry the fix in their tail ("run `cryptocli
+        // remote enable` on that machine..."), so this one wraps rather than
+        // clips — the paragraph is already wrapping for the rest of the panel.
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            format!("error: {}", truncate(error, 80)),
+            format!("error: {error}"),
             theme::bad(),
+        )));
+        lines.push(Line::from(Span::styled(
+            "press `t` to try again now",
+            theme::muted(),
         )));
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);

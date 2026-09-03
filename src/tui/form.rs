@@ -30,6 +30,9 @@ pub enum FormKind {
 pub struct Field {
     pub label: &'static str,
     pub value: String,
+    /// Insertion point, as a byte offset into `value`. Kept on a char
+    /// boundary by every method that moves it, so slicing is always safe.
+    cursor: usize,
     pub hint: &'static str,
     pub required: bool,
     /// Rendered as dots. Nothing here is a private key, but shoulder-surfing a
@@ -42,6 +45,7 @@ impl Field {
         Self {
             label,
             value: String::new(),
+            cursor: 0,
             hint,
             required,
             secret: false,
@@ -52,9 +56,47 @@ impl Field {
         Self {
             label,
             value: String::new(),
+            cursor: 0,
             hint,
             required,
             secret: true,
+        }
+    }
+
+    /// The value as it should be shown: masked for secrets.
+    fn display(&self) -> String {
+        if self.secret {
+            "•".repeat(self.value.chars().count())
+        } else {
+            self.value.clone()
+        }
+    }
+
+    /// The displayed value either side of the insertion point.
+    fn split_at_cursor(&self) -> (String, String) {
+        let before = self.value[..self.cursor].chars().count();
+        let shown = self.display();
+        let split = shown
+            .char_indices()
+            .nth(before)
+            .map(|(i, _)| i)
+            .unwrap_or(shown.len());
+        (shown[..split].to_string(), shown[split..].to_string())
+    }
+
+    /// Byte offset of the character before the cursor, if there is one.
+    fn previous_boundary(&self) -> Option<usize> {
+        self.value[..self.cursor]
+            .chars()
+            .next_back()
+            .map(|c| self.cursor - c.len_utf8())
+    }
+
+    /// Byte offset one character to the right, clamped to the end.
+    fn next_boundary(&self) -> usize {
+        match self.value[self.cursor..].chars().next() {
+            Some(c) => self.cursor + c.len_utf8(),
+            None => self.cursor,
         }
     }
 
@@ -62,6 +104,7 @@ impl Field {
         Self {
             label,
             value: default.to_string(),
+            cursor: default.len(),
             hint,
             required: false,
             secret: false,
@@ -141,7 +184,11 @@ impl Form {
             title: "Add machine".into(),
             fields: vec![
                 Field::new("name", "how to label it here, e.g. rig2", true),
-                Field::new("address", "host:port from `cryptocli remote enable`", true),
+                Field::new(
+                    "address",
+                    "host, or host:port — the port defaults to 9944",
+                    true,
+                ),
                 Field::secret("token", "shared secret from that machine", true),
                 Field::new(
                     "fingerprint",
@@ -193,14 +240,29 @@ impl Form {
 
     pub fn insert(&mut self, c: char) {
         if let Some(field) = self.fields.get_mut(self.focus) {
-            field.value.push(c);
+            field.value.insert(field.cursor, c);
+            field.cursor += c.len_utf8();
             self.error = None;
         }
     }
 
+    /// Delete the character before the cursor.
     pub fn backspace(&mut self) {
         if let Some(field) = self.fields.get_mut(self.focus) {
-            field.value.pop();
+            if let Some(previous) = field.previous_boundary() {
+                field.value.remove(previous);
+                field.cursor = previous;
+            }
+            self.error = None;
+        }
+    }
+
+    /// Delete the character under the cursor.
+    pub fn delete(&mut self) {
+        if let Some(field) = self.fields.get_mut(self.focus) {
+            if field.cursor < field.value.len() {
+                field.value.remove(field.cursor);
+            }
             self.error = None;
         }
     }
@@ -208,16 +270,45 @@ impl Form {
     pub fn clear_field(&mut self) {
         if let Some(field) = self.fields.get_mut(self.focus) {
             field.value.clear();
+            field.cursor = 0;
             self.error = None;
+        }
+    }
+
+    pub fn move_left(&mut self) {
+        if let Some(field) = self.fields.get_mut(self.focus)
+            && let Some(previous) = field.previous_boundary()
+        {
+            field.cursor = previous;
+        }
+    }
+
+    pub fn move_right(&mut self) {
+        if let Some(field) = self.fields.get_mut(self.focus) {
+            field.cursor = field.next_boundary();
+        }
+    }
+
+    pub fn move_to_start(&mut self) {
+        if let Some(field) = self.fields.get_mut(self.focus) {
+            field.cursor = 0;
+        }
+    }
+
+    pub fn move_to_end(&mut self) {
+        if let Some(field) = self.fields.get_mut(self.focus) {
+            field.cursor = field.value.len();
         }
     }
 
     pub fn next(&mut self) {
         self.focus = (self.focus + 1) % self.fields.len();
+        self.move_to_end();
     }
 
     pub fn previous(&mut self) {
         self.focus = (self.focus + self.fields.len() - 1) % self.fields.len();
+        self.move_to_end();
     }
 
     /// Turn the filled-in form into a request, or explain what is missing.
@@ -311,23 +402,26 @@ impl Form {
                         theme::label()
                     },
                 )];
+                let entry = Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD);
                 if field.value.is_empty() {
+                    if focused {
+                        // The block cursor comes first on an empty field, so
+                        // the hint is not pushed off its own line.
+                        spans.push(Span::styled("█", theme::accent()));
+                    }
                     spans.push(Span::styled(field.hint, theme::muted()));
-                } else {
-                    spans.push(Span::styled(
-                        if field.secret {
-                            "•".repeat(field.value.chars().count())
-                        } else {
-                            field.value.clone()
-                        },
-                        Style::default()
-                            .fg(theme::TEXT)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                }
-                if focused {
-                    // A block cursor, so it is obvious which field takes input.
+                } else if focused {
+                    // Split the value at the insertion point and draw the
+                    // block between the halves, so the cursor is where the
+                    // next character will actually land.
+                    let (before, after) = field.split_at_cursor();
+                    spans.push(Span::styled(before, entry));
                     spans.push(Span::styled("█", theme::accent()));
+                    spans.push(Span::styled(after, entry));
+                } else {
+                    spans.push(Span::styled(field.display(), entry));
                 }
                 Line::from(spans)
             })
@@ -357,8 +451,10 @@ impl Form {
             Span::styled(" move   ", theme::muted()),
             Span::styled("Enter", theme::accent()),
             Span::styled(" save   ", theme::muted()),
+            Span::styled("←→", theme::accent()),
+            Span::styled(" edit   ", theme::muted()),
             Span::styled("Ctrl-U", theme::accent()),
-            Span::styled(" clear field   ", theme::muted()),
+            Span::styled(" clear   ", theme::muted()),
             Span::styled("Esc", theme::accent()),
             Span::styled(" cancel", theme::muted()),
         ]));
@@ -395,6 +491,55 @@ fn pairs(value: &str, separator: char) -> Result<Vec<(String, String)>, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_can_be_edited_in_the_middle_not_just_appended() {
+        let mut form = Form::node();
+        for c in "1000.0.7:9944".chars() {
+            form.insert(c);
+        }
+        // Fix a typo at the start without retyping the rest.
+        form.move_to_start();
+        form.move_right();
+        form.delete();
+        assert_eq!(form.fields[0].value, "100.0.7:9944");
+        form.move_to_start();
+        form.move_right();
+        form.insert('.');
+        assert_eq!(form.fields[0].value, "1.00.0.7:9944");
+        // Backspace still takes the character to the left of the cursor.
+        form.backspace();
+        assert_eq!(form.fields[0].value, "100.0.7:9944");
+        form.move_to_end();
+        form.backspace();
+        assert_eq!(form.fields[0].value, "100.0.7:994");
+    }
+
+    #[test]
+    fn the_cursor_stays_on_character_boundaries() {
+        let mut form = Form::node();
+        for c in "rigé".chars() {
+            form.insert(c);
+        }
+        form.move_left();
+        form.insert('x');
+        assert_eq!(form.fields[0].value, "rigxé");
+        form.move_to_end();
+        form.backspace();
+        assert_eq!(form.fields[0].value, "rigx", "a 2-byte char is one delete");
+    }
+
+    #[test]
+    fn moving_between_fields_puts_the_cursor_at_the_end() {
+        let mut form = Form::rig();
+        form.next();
+        // `algo` carries a default; typing should extend it, not prepend.
+        while form.fields[form.focus].label != "algo" {
+            form.next();
+        }
+        form.insert('!');
+        assert_eq!(form.fields[form.focus].value, "sha256d!");
+    }
 
     #[test]
     fn required_fields_are_enforced() {

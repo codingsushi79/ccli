@@ -6,7 +6,6 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
@@ -107,6 +106,10 @@ pub enum Request {
     RemoveNode {
         name: String,
     },
+    /// Reconnect to a node right now instead of waiting for the next poll.
+    CheckNode {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,12 +134,25 @@ pub enum Response {
 pub trait Transport: Read + Write + Send {}
 impl<T: Read + Write + Send> Transport for T {}
 
+/// How long a local request may take before the client gives up.
+///
+/// A snapshot answers in well under a millisecond, but `AddNode` makes the
+/// daemon dial the new machine before it agrees to store it, so the local
+/// timeout has to be comfortably longer than that verification takes.
+const LOCAL_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// A blocking connection to a daemon, local (Unix socket) or remote (TLS).
 ///
 /// The reader and writer are the *same* object rather than two clones, because
 /// a TLS session cannot be split in half.
 pub struct Client {
     stream: BufReader<Box<dyn Transport>>,
+    /// Set once a request fails mid-flight. The protocol is strictly one line
+    /// in, one line out, so a request that timed out may still have its reply
+    /// in the pipe; reusing the connection would pair that reply with the
+    /// *next* request and quietly report the wrong thing. Once broken, the
+    /// connection is only good for being dropped.
+    broken: bool,
 }
 
 impl Client {
@@ -144,10 +160,11 @@ impl Client {
         let path = paths::socket_path();
         let stream = UnixStream::connect(&path)
             .with_context(|| format!("connecting to daemon at {}", path.display()))?;
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+        stream.set_read_timeout(Some(LOCAL_TIMEOUT))?;
+        stream.set_write_timeout(Some(LOCAL_TIMEOUT))?;
         Ok(Self {
             stream: BufReader::new(Box::new(stream)),
+            broken: false,
         })
     }
 
@@ -161,17 +178,8 @@ impl Client {
         fingerprint: &str,
         timeout: Duration,
     ) -> Result<Self> {
-        use std::net::ToSocketAddrs;
-        let resolved = address
-            .to_socket_addrs()
-            .with_context(|| format!("resolving {address}"))?
-            .next()
-            .with_context(|| format!("{address} did not resolve"))?;
-        let stream = TcpStream::connect_timeout(&resolved, timeout)
-            .with_context(|| format!("connecting to {address}"))?;
-        stream.set_read_timeout(Some(timeout))?;
-        stream.set_write_timeout(Some(timeout))?;
-        stream.set_nodelay(true).ok();
+        let address = crate::net::normalize_address(address)?;
+        let stream = crate::net::connect(&address, timeout)?;
 
         let config = crate::tls::client_config(fingerprint)?;
         let server_name = rustls::pki_types::ServerName::try_from("cryptocli-node")
@@ -182,6 +190,7 @@ impl Client {
 
         let mut client = Self {
             stream: BufReader::new(Box::new(tls)),
+            broken: false,
         };
         match client.send(&Request::Auth {
             token: token.to_string(),
@@ -200,20 +209,38 @@ impl Client {
         }
     }
 
+    /// True once a request failed and the reply stream can no longer be
+    /// trusted to line up with requests.
+    pub fn is_broken(&self) -> bool {
+        self.broken
+    }
+
     pub fn send(&mut self, req: &Request) -> Result<Response> {
-        let mut line = serde_json::to_string(req)?;
-        line.push('\n');
-        {
-            let writer = self.stream.get_mut();
-            writer.write_all(line.as_bytes())?;
-            writer.flush()?;
+        if self.broken {
+            bail!("connection is no longer usable; reconnect first");
         }
-        let mut buf = String::new();
-        let n = self.stream.read_line(&mut buf)?;
-        if n == 0 {
-            bail!("daemon closed the connection");
+        // Anything that leaves this function early has to poison the
+        // connection, so the exchange happens in a closure and the one
+        // `Err` path below is the only way out.
+        let result = (|| -> Result<Response> {
+            let mut line = serde_json::to_string(req)?;
+            line.push('\n');
+            {
+                let writer = self.stream.get_mut();
+                writer.write_all(line.as_bytes())?;
+                writer.flush()?;
+            }
+            let mut buf = String::new();
+            let n = self.stream.read_line(&mut buf)?;
+            if n == 0 {
+                bail!("daemon closed the connection");
+            }
+            Ok(serde_json::from_str(&buf)?)
+        })();
+        if result.is_err() {
+            self.broken = true;
         }
-        Ok(serde_json::from_str(&buf)?)
+        result
     }
 
     pub fn snapshot(&mut self) -> Result<Snapshot> {

@@ -96,6 +96,7 @@ pub fn help_overlay(frame: &mut Frame, area: Rect) {
         ("S / X", "start all enabled rigs / stop all rigs"),
         ("+ / -", "add or remove a thread on the selected rig"),
         ("p", "run the selected endpoint check now"),
+        ("t", "in Nodes: reconnect to the selected machine now"),
         ("r", "reload the config file"),
         ("f", "freeze the display (mining is unaffected)"),
         ("Q", "shut the daemon down and stop mining"),

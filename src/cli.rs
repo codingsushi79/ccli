@@ -933,9 +933,9 @@ fn node_command(command: NodeCommand) -> Result<()> {
             if config.nodes.iter().any(|n| n.name == name) {
                 bail!("a node named `{name}` already exists");
             }
-            if !address.contains(':') {
-                bail!("address should be host:port");
-            }
+            // Fills in the default port and rejects a pasted url, so the
+            // stored address is the one that will actually be dialled.
+            let address = crate::net::normalize_address(&address)?;
             // Verify before saving, so a typo surfaces now rather than as a
             // permanently red row on the dashboard.
             use std::io::Write;
@@ -945,8 +945,7 @@ fn node_command(command: NodeCommand) -> Result<()> {
                 None => {
                     // Trust on first use, but say so loudly: this is the one
                     // moment an interceptor could substitute its own key.
-                    let seen = crate::tls::peek_fingerprint(&address, timeout)
-                        .with_context(|| format!("cannot reach node `{name}`"))?;
+                    let seen = crate::tls::peek_fingerprint(&address, timeout)?;
                     println!("no --fingerprint given; the node presents:");
                     println!("  {seen}");
                     println!("Check that against `cryptocli remote show` on that machine.");
@@ -966,7 +965,7 @@ fn node_command(command: NodeCommand) -> Result<()> {
                 ),
                 Err(err) => {
                     println!("failed");
-                    return Err(err.context(format!("cannot reach node `{name}`")));
+                    return Err(err);
                 }
             }
             config.nodes.push(crate::config::NodeConfig {
@@ -1046,6 +1045,7 @@ fn remote_command(command: RemoteCommand) -> Result<()> {
             token,
             node_name,
         } => {
+            let listen = crate::net::normalize_listen(&listen)?;
             let token = token.unwrap_or_else(crate::nodes::generate_token);
             config.settings.remote.listen = Some(listen.clone());
             config.settings.remote.token = Some(token.clone());

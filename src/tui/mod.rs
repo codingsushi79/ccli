@@ -186,25 +186,34 @@ impl App {
         clamp(&mut self.node_selected, snapshot.nodes.len());
     }
 
-    fn send(&mut self, request: Request) {
+    /// Run one request against the daemon and hand back what it said.
+    fn request(&mut self, request: Request) -> Result<String, String> {
         if self.client.is_none() {
             match Client::connect() {
                 Ok(client) => self.client = Some(client),
-                Err(err) => {
-                    self.toast(format!("{err:#}"), true);
-                    return;
-                }
+                Err(err) => return Err(format!("{err:#}")),
             }
         }
         let Some(client) = self.client.as_mut() else {
-            return;
+            return Err("no connection to the daemon".into());
         };
-        match client.command(&request) {
-            Ok(message) => self.toast(message, false),
-            Err(err) => self.toast(format!("{err:#}"), true),
+        let result = client.command(&request).map_err(|err| format!("{err:#}"));
+        if result.is_err() {
+            // A failed request may have left an unread reply in the pipe,
+            // which would be mistaken for the answer to the next command.
+            // Reconnecting is cheap; a silently wrong answer is not.
+            self.client = None;
         }
         // Reflect the change immediately rather than waiting for the next tick.
         self.last_refresh = Instant::now() - REFRESH;
+        result
+    }
+
+    fn send(&mut self, request: Request) {
+        match self.request(request) {
+            Ok(message) => self.toast(message, false),
+            Err(err) => self.toast(err, true),
+        }
     }
 
     /// On quit, stop a daemon we started if it never ended up mining. A daemon
@@ -371,6 +380,22 @@ impl App {
                     self.send(route(node, Request::CheckEndpoint { name }));
                 }
             }
+            // Reconnect to a machine now rather than waiting out its backoff.
+            KeyCode::Char('t') if self.tab == Tab::Nodes => {
+                let selected = self
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| s.nodes.get(self.node_selected))
+                    .filter(|node| !node.local)
+                    .map(|node| node.name.clone());
+                match selected {
+                    // The daemon dials the peer while this blocks, so the
+                    // result lands in one toast rather than a "connecting..."
+                    // that could never be drawn before the answer arrives.
+                    Some(name) => self.send(Request::CheckNode { name }),
+                    None => self.toast("select another machine to test".into(), true),
+                }
+            }
             KeyCode::Char('a') => self.open_add_form(),
             KeyCode::Char('c') => {
                 // Add another coin to the selected rig, mined at the same time.
@@ -424,13 +449,30 @@ impl App {
             }
             KeyCode::Tab | KeyCode::Down => form.next(),
             KeyCode::BackTab | KeyCode::Up => form.previous(),
+            KeyCode::Left => form.move_left(),
+            KeyCode::Right => form.move_right(),
+            KeyCode::Home => form.move_to_start(),
+            KeyCode::End => form.move_to_end(),
+            KeyCode::Char('a') if ctrl => form.move_to_start(),
+            KeyCode::Char('e') if ctrl => form.move_to_end(),
             KeyCode::Backspace => form.backspace(),
+            KeyCode::Delete => form.delete(),
             KeyCode::Char(c) => form.insert(c),
             KeyCode::Enter => match form.build() {
-                Ok(request) => {
-                    self.form = None;
-                    self.send(request);
-                }
+                Ok(request) => match self.request(request) {
+                    Ok(message) => {
+                        self.form = None;
+                        self.toast(message, false);
+                    }
+                    // Keep the form up when the daemon says no. Its footer
+                    // wraps, so a long "cannot connect to ..." is readable in
+                    // full, and nothing typed has to be typed again.
+                    Err(message) => {
+                        if let Some(form) = self.form.as_mut() {
+                            form.error = Some(message);
+                        }
+                    }
+                },
                 Err(message) => form.error = Some(message),
             },
             _ => {}
@@ -740,6 +782,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("↑↓", "select"),
             ("a", "add machine"),
             ("d", "remove"),
+            ("t", "reconnect now"),
             ("r", "reload"),
             ("?", "help"),
             ("q", "quit (keeps mining)"),
